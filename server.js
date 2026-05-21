@@ -74,6 +74,73 @@ function initFirebase() {
   return db;
 }
 
+
+function pickFirstText(source = {}, keys = []) {
+  for (const key of keys) {
+    const value = source?.[key];
+    if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+  }
+  return "";
+}
+
+function resolveWorkerNameFromPayload(source = {}) {
+  const direct = pickFirstText(source, [
+    "trabajador", "trabajadorNombre", "nombreTrabajador", "workerName", "worker_name",
+    "worker", "colaborador", "colaboradorNombre", "empleado", "empleadoNombre",
+    "nombre", "displayName", "name", "fullName", "usuario", "userName"
+  ]);
+
+  if (direct) return direct;
+
+  const nestedCandidates = [
+    source.trabajadorData, source.workerData, source.colaboradorData,
+    source.empleadoData, source.user, source.usuarioData, source.profile
+  ];
+
+  for (const item of nestedCandidates) {
+    if (!item || typeof item !== "object") continue;
+    const nested = pickFirstText(item, [
+      "nombre", "trabajador", "trabajadorNombre", "name",
+      "fullName", "displayName", "workerName"
+    ]);
+    if (nested) return nested;
+  }
+
+  return "";
+}
+
+function resolveSedeFromPayload(source = {}) {
+  return pickFirstText(source, ["sede", "sucursal", "local", "tienda", "store", "branch"]);
+}
+
+function normalizeNotificationAction(source = {}, collectionName = "") {
+  const tipo = pickFirstText(source, ["tipo", "evento", "type", "accion", "action", "estado", "status"]) || collectionName;
+  const mensaje = pickFirstText(source, ["mensaje", "message", "descripcion", "detalle", "description"]);
+  return `${tipo} ${mensaje}`.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function buildWhatsAppStyleOptions(data = {}) {
+  return {
+    priority: 10,
+    android_channel_id: process.env.ONESIGNAL_ANDROID_CHANNEL_ID || process.env.ONE_SIGNAL_ANDROID_CHANNEL_ID || undefined,
+    android_accent_color: process.env.PUSH_ACCENT_COLOR || "00D9FF",
+    small_icon: process.env.PUSH_SMALL_ICON || "ic_stat_onesignal_default",
+    large_icon: process.env.PUSH_LARGE_ICON || undefined,
+    chrome_web_icon: process.env.PUSH_WEB_ICON || undefined,
+    chrome_web_badge: process.env.PUSH_WEB_BADGE || undefined,
+    android_sound: process.env.ADMIN_PUSH_SOUND || "alerta_admin",
+    ios_sound: process.env.ADMIN_PUSH_SOUND_IOS || "alerta_admin.wav",
+    adm_sound: process.env.ADMIN_PUSH_SOUND || "alerta_admin",
+    android_vibration_pattern: process.env.ADMIN_VIBRATION_PATTERN || "200,100,200,100,350",
+    ttl: Number(process.env.PUSH_TTL_SECONDS || 86400),
+    data: {
+      pushStyle: "whatsapp_full",
+      priority: "high",
+      ...data,
+    },
+  };
+}
+
 function normalizeText(value = "") {
   return String(value || "").trim();
 }
@@ -86,104 +153,104 @@ function getFirstAvailableNumber(source = {}, keys = []) {
   return 0;
 }
 
+function getFirstAvailableNumber(source = {}, keys = []) {
+  for (const key of keys) {
+    const value = Number(source[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+
 function buildNotificationPayload(source = {}, collectionName = "") {
-  const trabajador = normalizeText(
-    source.trabajador ||
-    source.nombre ||
-    source.workerName ||
-    source.worker ||
-    source.colaborador ||
-    source.empleado ||
-    ""
-  );
-
-  const tipo = normalizeText(source.tipo || source.evento || source.type || source.accion || collectionName);
-  const sede = normalizeText(source.sede || source.sucursal || source.local || "");
-  const mensaje = normalizeText(source.mensaje || source.message || source.descripcion || source.detalle || "");
-  const estado = normalizeText(source.estado || source.status || "");
-
-  const text = `${tipo} ${mensaje} ${estado}`.toLowerCase();
+  const trabajador = resolveWorkerNameFromPayload(source);
+  const sede = resolveSedeFromPayload(source);
+  const tipo = pickFirstText(source, ["tipo", "evento", "type", "accion", "action"]) || collectionName;
+  const mensaje = pickFirstText(source, ["mensaje", "message", "descripcion", "detalle", "description"]);
+  const text = normalizeNotificationAction(source, collectionName);
 
   const tardanzaMinutos = getFirstAvailableNumber(source, [
-    "tardanza",
-    "minutosTardanza",
-    "tardanzaMin",
-    "minutos_tardanza",
-    "lateMinutes",
-    "minutesLate",
+    "tardanza", "minutosTardanza", "tardanzaMin", "minutos_tardanza",
+    "lateMinutes", "minutesLate"
   ]);
 
   const breakMinutos = getFirstAvailableNumber(source, [
-    "breakMinutos",
-    "minutosBreak",
-    "duracionBreak",
-    "breakDuration",
-    "break_minutes",
-    "minutesBreak",
+    "breakMinutos", "minutosBreak", "duracionBreak", "breakDuration",
+    "break_minutes", "minutesBreak"
   ]);
 
   const breakExceso = getFirstAvailableNumber(source, [
-    "breakExceso",
-    "excesoBreak",
-    "minutosExcesoBreak",
-    "breakExceededMinutes",
-    "excessBreakMinutes",
+    "breakExceso", "excesoBreak", "minutosExcesoBreak",
+    "breakExceededMinutes", "excessBreakMinutes"
   ]);
 
   const ingresoAnticipado = getFirstAvailableNumber(source, [
-    "minutosAnticipado",
-    "anticipadoMinutos",
-    "minutosAntes",
-    "earlyMinutes",
-    "minutesEarly",
+    "minutosAnticipado", "anticipadoMinutos", "minutosAntes",
+    "earlyMinutes", "minutesEarly"
+  ]);
+
+  const salidaAnticipada = getFirstAvailableNumber(source, [
+    "minutosSalidaAnticipada", "salidaAnticipadaMinutos",
+    "earlyExitMinutes", "minutesEarlyExit"
   ]);
 
   const isEntrada = text.includes("entrada") || text.includes("ingreso");
   const isSalida = text.includes("salida");
   const isBreak = text.includes("break");
   const isBreakStart = isBreak && (text.includes("inicio") || text.includes("inicia"));
-  const isBreakEnd = isBreak && (text.includes("termino") || text.includes("término") || text.includes("fin") || text.includes("retorno"));
+  const isBreakEnd = isBreak && (text.includes("termino") || text.includes("fin") || text.includes("retorno"));
   const isLate = text.includes("tard") || tardanzaMinutos > 8;
-  const isEarly = text.includes("anticip") || text.includes("antes") || ingresoAnticipado > 0;
+  const isEarlyEntry = text.includes("anticip") || text.includes("antes") || ingresoAnticipado > 0;
+  const isEarlyExit = isSalida && (salidaAnticipada > 0 || text.includes("salida anticipada") || text.includes("antes de salida"));
   const isGps = text.includes("gps") || text.includes("rango") || text.includes("fuera");
 
-  const name = trabajador || "Trabajador";
+  const name = trabajador || "Trabajador no identificado";
   const place = sede ? ` · ${sede}` : "";
 
-  let title = "🔔 EL TABLÓN - Alerta operativa";
-  let body = mensaje || "Nueva actualización operativa registrada.";
+  let title = "🔔 Movimiento operativo";
+  let body = `${name}${place}: ${mensaje || tipo || "nueva actividad registrada"}.`;
+  let eventKey = "general";
 
   if (isLate) {
     const minutesText = tardanzaMinutos ? `${tardanzaMinutos} min` : "fuera de tolerancia";
-    title = "⚠️ Tardanza registrada";
-    body = `${name}${place} ingresó tarde: ${minutesText}.`;
-  } else if (isEarly) {
+    title = `⚠️ ${name}`;
+    body = `Ingresó tarde: ${minutesText}${place}.`;
+    eventKey = "late";
+  } else if (isEarlyExit) {
+    const minutesText = salidaAnticipada ? `${salidaAnticipada} min antes` : "antes de su hora programada";
+    title = `⚠️ ${name}`;
+    body = `Marcó salida ${minutesText}${place}.`;
+    eventKey = "early_exit";
+  } else if (isEarlyEntry && isEntrada) {
     const minutesText = ingresoAnticipado ? `${ingresoAnticipado} min antes` : "antes de su horario";
-    title = "⏱️ Ingreso anticipado";
-    body = `${name}${place} marcó ingreso ${minutesText}.`;
+    title = `⏱️ ${name}`;
+    body = `Marcó ingreso ${minutesText}${place}.`;
+    eventKey = "early_entry";
   } else if (isBreak && (breakExceso > 0 || breakMinutos > 60 || text.includes("exced"))) {
     const exceso = breakExceso || Math.max(0, breakMinutos - 60);
     const total = breakMinutos ? ` · total ${breakMinutos} min` : "";
-    title = "☕ Break excedido";
-    body = `${name}${place} sobrepasó su break${exceso ? ` por ${exceso} min` : ""}${total}.`;
+    title = `☕ ${name}`;
+    body = `Break excedido${exceso ? ` por ${exceso} min` : ""}${total}${place}.`;
+    eventKey = "break_exceeded";
   } else if (isBreakStart) {
-    title = "☕ Inicio de break";
-    body = `${name}${place} inició su break.`;
+    title = `☕ ${name}`;
+    body = `Inició break${place}.`;
+    eventKey = "break_start";
   } else if (isBreakEnd) {
-    title = "✅ Retorno de break";
-    body = `${name}${place} terminó su break.`;
+    title = `✅ ${name}`;
+    body = `Terminó break${place}.`;
+    eventKey = "break_end";
   } else if (isEntrada) {
-    title = "✅ Ingreso registrado";
-    body = `${name}${place} marcó ingreso.`;
+    title = `✅ ${name}`;
+    body = `Ingreso registrado${place}.`;
+    eventKey = "entry";
   } else if (isSalida) {
-    title = "🏁 Salida registrada";
-    body = `${name}${place} marcó salida.`;
+    title = `🏁 ${name}`;
+    body = `Salida registrada${place}.`;
+    eventKey = "exit";
   } else if (isGps) {
-    title = "📍 Alerta GPS";
-    body = `${name}${place} requiere validación de ubicación.`;
-  } else if (trabajador) {
-    title = "🔔 Movimiento operativo";
-    body = `${name}${place}${tipo ? ` · ${tipo}` : ""}${mensaje ? `: ${mensaje}` : ""}`;
+    title = `📍 ${name}`;
+    body = `Validación GPS requerida${place}.`;
+    eventKey = "gps";
   }
 
   return {
@@ -191,13 +258,15 @@ function buildNotificationPayload(source = {}, collectionName = "") {
     body,
     data: {
       collectionName,
-      trabajador,
-      tipo,
+      trabajador: name,
       sede,
+      tipo,
+      eventKey,
       tardanzaMinutos,
       breakMinutos,
       breakExceso,
       ingresoAnticipado,
+      salidaAnticipada,
       createdAt: new Date().toISOString(),
     },
   };
@@ -240,7 +309,7 @@ async function sendOneSignalNotification({ title, body, data }) {
     app_id: ONE_SIGNAL_APP_ID,
     headings: { es: title, en: title },
     contents: { es: body, en: body },
-    data: data || {},
+    ...buildWhatsAppStyleOptions(data || {}),
   };
 
   if (playerIds.length) {
@@ -503,12 +572,12 @@ async function sendWorkerPush(worker = {}, title = "", body = "", data = {}) {
     include_player_ids,
     headings: { es: title, en: title },
     contents: { es: body, en: body },
-    data: {
+    ...buildWhatsAppStyleOptions({
       target: "worker",
       trabajador: getWorkerName(worker),
       sede: getWorkerSede(worker),
       ...data,
-    },
+    }),
   };
 
   const response = await fetch("https://onesignal.com/api/v1/notifications", {
