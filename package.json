@@ -1,0 +1,21 @@
+{
+  "name": "el-tablon-push-bridge-render",
+  "version": "1.0.0",
+  "description": "Bridge 24/7 para notificaciones OneSignal + Firebase Firestore - EL TABL\u00d3N",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.0.2",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

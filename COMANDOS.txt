@@ -1,0 +1,20 @@
+# ==========================================
+# EL TABLÓN - COMANDOS LOCALES OPCIONALES
+# ==========================================
+
+cd onesignal-push-bridge
+
+npm install
+
+# Copiar .env.example como .env y llenar variables:
+copy .env.example .env
+
+# Probar localmente:
+npm start
+
+# Health local:
+# http://localhost:3000/health
+
+# Render usará automáticamente:
+# npm install
+# npm start
