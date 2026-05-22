@@ -1,12 +1,13 @@
 {
   "name": "el-tablon-push-bridge-render",
   "version": "1.0.0",
-  "description": "Bridge 24/7 para notificaciones OneSignal + Firebase Firestore - EL TABL\u00d3N",
+  "description": "Bridge 24/7 para notificaciones OneSignal + Firebase Firestore - EL TABLÓN - quota safe",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "check": "node --check server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
