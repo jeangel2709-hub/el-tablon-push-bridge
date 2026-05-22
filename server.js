@@ -2,7 +2,7 @@
  * EL TABLÓN FOOD CENTER - PUSH BRIDGE 24/7
  * Render + Firebase Firestore + OneSignal
  *
- * OPTIMIZACIÓN FIRESTORE QUOTA / ANTI-SPAM PRO
+ * OPTIMIZACIÓN FIRESTORE QUOTA / ANTI-SPAM PRO - FIX TTLSET V2
  * SOLO NOTIFICACIONES. No toca dashboard, diseño, horarios, ranking ni asistencia.
  */
 
@@ -90,6 +90,61 @@ const DEFAULT_CONFIG = {
   },
 };
 
+class TTLSet {
+  constructor(ttlMs) {
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+
+  has(key) {
+    this.cleanup();
+    return this.map.has(key);
+  }
+
+  add(key) {
+    this.cleanup();
+    this.map.set(key, Date.now());
+  }
+
+  cleanup() {
+    const limit = Date.now() - this.ttlMs;
+    for (const [key, ts] of this.map.entries()) {
+      if (ts < limit) this.map.delete(key);
+    }
+  }
+}
+
+class TTLMap {
+  constructor(ttlMs) {
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+
+  get(key) {
+    this.cleanup();
+    return this.map.get(key);
+  }
+
+  set(key, value) {
+    this.cleanup();
+    this.map.set(key, { value, ts: Date.now() });
+  }
+
+  hasFresh(key, ttlMs = this.ttlMs) {
+    this.cleanup();
+    const item = this.map.get(key);
+    return item && Date.now() - item.ts < ttlMs;
+  }
+
+  cleanup() {
+    const limit = Date.now() - this.ttlMs;
+    for (const [key, item] of this.map.entries()) {
+      if (!item || item.ts < limit) this.map.delete(key);
+    }
+  }
+}
+
+
 let db = null;
 let autoCheckTimer = null;
 let autoCheckRunning = false;
@@ -156,60 +211,6 @@ function markQuotaBackoff(config = DEFAULT_CONFIG) {
 
 function inQuotaBackoff() {
   return quotaBackoffUntil && Date.now() < quotaBackoffUntil;
-}
-
-class TTLSet {
-  constructor(ttlMs) {
-    this.ttlMs = ttlMs;
-    this.map = new Map();
-  }
-
-  has(key) {
-    this.cleanup();
-    return this.map.has(key);
-  }
-
-  add(key) {
-    this.cleanup();
-    this.map.set(key, Date.now());
-  }
-
-  cleanup() {
-    const limit = Date.now() - this.ttlMs;
-    for (const [key, ts] of this.map.entries()) {
-      if (ts < limit) this.map.delete(key);
-    }
-  }
-}
-
-class TTLMap {
-  constructor(ttlMs) {
-    this.ttlMs = ttlMs;
-    this.map = new Map();
-  }
-
-  get(key) {
-    this.cleanup();
-    return this.map.get(key);
-  }
-
-  set(key, value) {
-    this.cleanup();
-    this.map.set(key, { value, ts: Date.now() });
-  }
-
-  hasFresh(key, ttlMs = this.ttlMs) {
-    this.cleanup();
-    const item = this.map.get(key);
-    return item && Date.now() - item.ts < ttlMs;
-  }
-
-  cleanup() {
-    const limit = Date.now() - this.ttlMs;
-    for (const [key, item] of this.map.entries()) {
-      if (!item || item.ts < limit) this.map.delete(key);
-    }
-  }
 }
 
 function requiredEnvReady() {
