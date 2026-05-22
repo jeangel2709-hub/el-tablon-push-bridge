@@ -150,8 +150,8 @@ let autoCheckTimer = null;
 let autoCheckRunning = false;
 let quotaBackoffUntil = 0;
 
-const processedIds = new TTLSet(24 * 60 * 60 * 1000);
-const sentMemory = new TTLMap(24 * 60 * 60 * 1000);
+const processedIds = new TTLSet(SAFE_QUOTA_MODE ? 6 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000);
+const sentMemory = new TTLMap(SAFE_QUOTA_MODE ? 6 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000);
 
 const cache = {
   config: { value: null, expiresAt: 0 },
@@ -165,6 +165,28 @@ const cache = {
 function safeLog(...args) {
   console.log(new Date().toLocaleString("es-PE"), "|", ...args);
 }
+
+let firestoreBlockedUntil = 0;
+
+function isQuotaError(error) {
+  const text = String(error?.message || error || "").toUpperCase();
+  return text.includes("RESOURCE_EXHAUSTED") || text.includes("QUOTA");
+}
+
+function markFirestoreBackoff(error, label = "Firestore") {
+  if (!isQuotaError(error)) return false;
+  firestoreBlockedUntil = Date.now() + FIRESTORE_BACKOFF_MINUTES * 60 * 1000;
+  safeLog(`🧯 ${label}: cuota excedida. Pausa inteligente hasta ${new Date(firestoreBlockedUntil).toLocaleTimeString("es-PE")}`);
+  return true;
+}
+
+function canReadFirestore(label = "lectura") {
+  if (Date.now() < firestoreBlockedUntil) {
+    return false;
+  }
+  return true;
+}
+
 
 function normalizeText(value = "") {
   return String(value || "")
@@ -1358,7 +1380,8 @@ app.listen(PORT, () => {
   if (db) {
     startListeners();
     startAutomaticChecks();
-    safeLog("🚀 PUSH EL TABLÓN ACTIVO — RENDER 24/7");
+    safeLog("🛡️ MODO SEGURO ANTI-CUOTA ACTIVO: listeners sí, barridos repetitivos no");
+  safeLog("🚀 PUSH EL TABLÓN ACTIVO — RENDER 24/7");
     safeLog("🧠 Modo quota-safe / anti-spam / cache inteligente activo");
   } else {
     safeLog("❌ Firebase no inició. Servicio vivo para healthcheck, pero sin listeners.");
