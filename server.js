@@ -30,6 +30,7 @@ const COLLECTIONS_TO_LISTEN = [
   "alertas_sistema",
   "alertas",
   "asistencia",
+  "asistencias",
   "notificacionesCola",
 ];
 
@@ -122,6 +123,14 @@ function normalizeNotificationAction(source = {}, collectionName = "") {
 function buildWhatsAppStyleOptions(data = {}) {
   return {
     priority: 10,
+    android_visibility: 1,
+    android_group: "EL_TABLON_ALERTAS",
+    collapse_id: data?.rule || data?.eventKey || data?.tipo || undefined,
+    web_push_topic: data?.rule || data?.eventKey || "el_tablon_alerta",
+    chrome_web_image: process.env.PUSH_WEB_IMAGE || undefined,
+    chrome_web_icon: process.env.PUSH_WEB_ICON || undefined,
+    chrome_web_badge: process.env.PUSH_WEB_BADGE || undefined,
+    url: process.env.PUSH_DEFAULT_URL || "https://el-tablon-2ad52.web.app/admin",
     android_channel_id: process.env.ONESIGNAL_ANDROID_CHANNEL_ID || process.env.ONE_SIGNAL_ANDROID_CHANNEL_ID || undefined,
     android_accent_color: process.env.PUSH_ACCENT_COLOR || "00D9FF",
     small_icon: process.env.PUSH_SMALL_ICON || "ic_stat_onesignal_default",
@@ -481,6 +490,135 @@ function parseScheduleWindow(scheduleValue = "", baseDate = new Date()) {
   };
 }
 
+
+function normalizeWorkerKey(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "-");
+}
+
+function toDateInputValue(date = new Date()) {
+  const d = date instanceof Date ? date : new Date(date);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function getWeekMondayValue(date = new Date()) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + diff);
+  return toDateInputValue(d);
+}
+
+function dayKeyShort(date = new Date()) {
+  return ["dom", "lun", "mar", "mie", "jue", "vie", "sab"][date.getDay()];
+}
+
+async function getDailyScheduleOverride(workerName = "", date = new Date()) {
+  if (!db || !workerName) return "";
+  const fecha = toDateInputValue(date);
+  const slug = normalizeWorkerKey(workerName);
+  const ids = [`${workerName}_${fecha}`, `${slug}_${fecha}`];
+  for (const collectionName of ["horarios_dia", "horarios", "daily_schedules"]) {
+    for (const id of ids) {
+      try {
+        const snap = await db.collection(collectionName).doc(id).get();
+        if (snap.exists) {
+          const data = snap.data() || {};
+          const value = data.horario || data.turno || data.jornada || data.horarioFinal || "";
+          if (String(value || "").trim()) return String(value).trim();
+        }
+      } catch (error) {
+        safeLog(`⚠️ No se pudo leer ${collectionName}/${id}:`, error.message);
+      }
+    }
+  }
+  return "";
+}
+
+async function getWeeklyScheduleOverride(workerName = "", date = new Date()) {
+  if (!db || !workerName) return "";
+  const weekStart = getWeekMondayValue(date);
+  const dayKey = dayKeyShort(date);
+  const slug = normalizeWorkerKey(workerName);
+  const ids = [`${slug}_${weekStart}`, slug, `${workerName}_${weekStart}`, workerName];
+  for (const collectionName of ["horarios_semanales", "schedules", "horarios_programados"]) {
+    for (const id of ids) {
+      try {
+        const snap = await db.collection(collectionName).doc(id).get();
+        if (snap.exists) {
+          const data = snap.data() || {};
+          const value = data[dayKey] || data.horarios?.[dayKey] || data.dias?.[dayKey] || data.programacion?.[dayKey] || "";
+          if (String(value || "").trim()) return String(value).trim();
+        }
+      } catch (error) {
+        safeLog(`⚠️ No se pudo leer ${collectionName}/${id}:`, error.message);
+      }
+    }
+  }
+  return "";
+}
+
+async function getScheduleWindowForWorker(worker = {}, date = new Date()) {
+  const workerName = getWorkerName(worker);
+  const schedule =
+    await getDailyScheduleOverride(workerName, date) ||
+    await getWeeklyScheduleOverride(workerName, date) ||
+    getScheduleForToday(worker, date);
+
+  const window = parseScheduleWindow(schedule, date);
+  if (!window) return null;
+
+  return { ...window, rawSchedule: schedule };
+}
+
+async function sendAdminSmartPush(title = "", body = "", data = {}) {
+  try {
+    const payload = {
+      title,
+      body,
+      data: {
+        target: "admin",
+        smartAutomatic: true,
+        ...data,
+      },
+    };
+    const result = await sendOneSignalNotification(payload);
+    safeLog("✅ Push admin inteligente:", title, data?.trabajador || "");
+    return result;
+  } catch (error) {
+    safeLog("❌ Push admin inteligente:", error.message);
+    return null;
+  }
+}
+
+async function registerAutomaticAlert(type = "", worker = {}, message = "", data = {}) {
+  if (!db) return;
+  try {
+    await db.collection("alertas_sistema").add({
+      tipo: type,
+      trabajador: getWorkerName(worker),
+      sede: getWorkerSede(worker),
+      mensaje: message,
+      nivel: data.priority || data.nivel || "alto",
+      origen: "render_alerta_automatica",
+      pushProcesado: true,
+      pushSent: true,
+      notificacionEnviada: true,
+      data,
+      createdAt: new Date().toISOString(),
+      createdAtServer: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (error) {
+    safeLog("⚠️ No se pudo registrar alerta automática:", error.message);
+  }
+}
+
 function getRecordDateTime(record = {}) {
   const rawDate = record.fecha || record.date || record.createdAt || record.created_at || record.timestamp;
   let date = null;
@@ -659,8 +797,7 @@ async function processWorkerNotificationRules() {
     try {
       const workerName = getWorkerName(worker);
       const sede = getWorkerSede(worker);
-      const schedule = getScheduleForToday(worker, now);
-      const window = parseScheduleWindow(schedule, now);
+      const window = await getScheduleWindowForWorker(worker, now);
       if (!window) continue;
 
       const scanStart = new Date(window.start.getTime() - 30 * 60 * 1000);
@@ -693,12 +830,19 @@ async function processWorkerNotificationRules() {
         const minutesLate = Math.max(0, Math.floor((now - window.start) / 60000));
         const key = `${worker.id || workerName}:late-alert:${window.label}`;
         if (shouldSendOnce(key)) {
+          const message = `${workerName}${sede ? ` · ${sede}` : ""}: han pasado ${minutesLate} min desde su hora de ingreso.`;
           await sendWorkerPush(
             worker,
             "⚠️ Tolerancia superada",
             `${workerName}${sede ? ` · ${sede}` : ""}: han pasado ${minutesLate} min desde tu hora de ingreso.`,
             { rule: "late_alert", minutesLate, schedule: window.label }
           );
+          await sendAdminSmartPush(
+            `⚠️ ${workerName} no marcó ingreso`,
+            message,
+            { rule: "missing_entry_late", trabajador: workerName, sede, minutesLate, schedule: window.label, priority: "critical" }
+          );
+          await registerAutomaticAlert("falta_marcacion_ingreso", worker, message, { minutesLate, schedule: window.label, priority: "critica" });
         }
       }
 
@@ -713,12 +857,19 @@ async function processWorkerNotificationRules() {
           const exceeded = breakMinutes - BREAK_LIMIT_MINUTES;
           const key = `${worker.id || workerName}:break-exceeded:${breakStartDate.toISOString().slice(0, 16)}`;
           if (shouldSendOnce(key)) {
+            const message = `${workerName}${sede ? ` · ${sede}` : ""}: lleva ${breakMinutes} min en break, excedido por ${exceeded} min.`;
             await sendWorkerPush(
               worker,
               "☕ Break excedido",
               `${workerName}${sede ? ` · ${sede}` : ""}: tu break supera 1 hora por ${exceeded} min.`,
               { rule: "break_exceeded", breakMinutes, exceeded, schedule: window.label }
             );
+            await sendAdminSmartPush(
+              `☕ ${workerName} excedió break`,
+              message,
+              { rule: "break_exceeded", trabajador: workerName, sede, breakMinutes, exceeded, schedule: window.label, priority: "high" }
+            );
+            await registerAutomaticAlert("break_excedido", worker, message, { breakMinutes, exceeded, schedule: window.label, priority: "alta" });
           }
         }
       }
@@ -730,12 +881,43 @@ async function processWorkerNotificationRules() {
           const earlyMinutes = Math.max(1, Math.ceil((window.end - salidaDate) / 60000));
           const key = `${worker.id || workerName}:early-exit:${salida.id || salidaDate.toISOString()}`;
           if (shouldSendOnce(key)) {
+            const message = `${workerName}${sede ? ` · ${sede}` : ""}: marcó salida ${earlyMinutes} min antes de su horario (${window.label}).`;
             await sendWorkerPush(
               worker,
               "⚠️ Salida antes de horario",
               `${workerName}${sede ? ` · ${sede}` : ""}: marcaste salida ${earlyMinutes} min antes de tu horario.`,
               { rule: "early_exit", earlyMinutes, schedule: window.label }
             );
+            await sendAdminSmartPush(
+              `🚨 ${workerName} salida anticipada`,
+              message,
+              { rule: "early_exit", trabajador: workerName, sede, earlyMinutes, schedule: window.label, priority: "critical" }
+            );
+            await registerAutomaticAlert("salida_anticipada", worker, message, { earlyMinutes, schedule: window.label, priority: "critica" });
+          }
+        }
+      }
+
+      // 5. Trabajador sin salida después de finalizar su turno.
+      if (entrada && !salida) {
+        const missingExitLimit = new Date(window.end.getTime() + Number(process.env.MISSING_EXIT_GRACE_MINUTES || 20) * 60 * 1000);
+        if (now >= missingExitLimit) {
+          const minutesAfterExit = Math.max(1, Math.floor((now - window.end) / 60000));
+          const key = `${worker.id || workerName}:missing-exit:${window.label}`;
+          if (shouldSendOnce(key)) {
+            const message = `${workerName}${sede ? ` · ${sede}` : ""}: sigue sin marcar salida ${minutesAfterExit} min después de su horario (${window.label}).`;
+            await sendAdminSmartPush(
+              `🚨 ${workerName} sin salida`,
+              message,
+              { rule: "missing_exit", trabajador: workerName, sede, minutesAfterExit, schedule: window.label, priority: "critical" }
+            );
+            await sendWorkerPush(
+              worker,
+              "🚨 Salida pendiente",
+              `${workerName}${sede ? ` · ${sede}` : ""}: recuerda marcar tu salida.`,
+              { rule: "missing_exit", minutesAfterExit, schedule: window.label }
+            );
+            await registerAutomaticAlert("salida_no_marcada", worker, message, { minutesAfterExit, schedule: window.label, priority: "critica" });
           }
         }
       }
@@ -748,7 +930,7 @@ async function processWorkerNotificationRules() {
 function startWorkerNotificationRules() {
   if (workerAlertTimer) return;
 
-  safeLog("📲 Reglas push trabajadores activas: recordatorio, tolerancia, break, salida anticipada.");
+  safeLog("📲 Reglas push trabajadores/admin activas: recordatorio, falta ingreso, tolerancia, break, salida anticipada, salida no marcada.");
 
   processWorkerNotificationRules().catch((error) => {
     safeLog("❌ Worker notification initial run:", error.message);
