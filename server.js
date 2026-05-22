@@ -8,6 +8,13 @@
 
 require("dotenv").config();
 
+// MODO SEGURO ANTI-CUOTA - DEFINIDO AL INICIO
+// Mantiene listeners/push por eventos, pero evita barridos repetitivos que saturan Firestore.
+const SAFE_QUOTA_MODE = String(process.env.SAFE_QUOTA_MODE || "true").toLowerCase() !== "false";
+const DISABLE_AUTO_SWEEPERS = String(process.env.DISABLE_AUTO_SWEEPERS || "true").toLowerCase() !== "false";
+const FIRESTORE_BACKOFF_MINUTES = Number(process.env.FIRESTORE_BACKOFF_MINUTES || 15);
+
+
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
