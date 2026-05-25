@@ -672,6 +672,235 @@ function resolveWorkerNameFromPayload(source = {}) {
   return "";
 }
 
+
+/**
+ * FIX PRODUCTIVO: resolver nombre real antes de enviar push.
+ * Si la alerta llega sin trabajador/nombre, busca por trabajadorId, dni o asistenciaId.
+ * Mantiene modo quota-safe: usa cache y no escribe asistencia.
+ */
+const workerIdentityCache = new TTLMap(60 * 60 * 1000);
+
+function getDniFromPayload(source = {}) {
+  return String(
+    source.dni ||
+    source.documento ||
+    source.workerDni ||
+    source.trabajadorDni ||
+    source.colaboradorDni ||
+    source.empleadoDni ||
+    source.numeroDocumento ||
+    ""
+  ).replace(/\D/g, "");
+}
+
+function getReferenceIdsFromPayload(source = {}) {
+  return [
+    source.trabajadorId,
+    source.workerId,
+    source.colaboradorId,
+    source.empleadoId,
+    source.userId,
+    source.uid,
+    source.usuarioId,
+    source.asistenciaId,
+    source.attendanceId,
+    source.id,
+  ]
+    .filter(Boolean)
+    .map((x) => String(x).trim())
+    .filter(Boolean);
+}
+
+function normalizeWorkerFromRecord(record = {}) {
+  if (!record || typeof record !== "object") return null;
+
+  const name = resolveWorkerNameFromPayload(record);
+  const dni = getDniFromPayload(record);
+  const sede = resolveSedeFromPayload(record);
+  const id = String(record.id || record.trabajadorId || record.workerId || record.uid || "").trim();
+
+  if (!name && !dni && !id) return null;
+
+  return {
+    id,
+    trabajador: name || "",
+    nombre: name || "",
+    workerName: name || "",
+    dni,
+    documento: dni,
+    sede,
+    sucursal: sede,
+    playerId: record.playerId || record.oneSignalPlayerId || record.onesignalPlayerId || record.subscriptionId || "",
+    playerIds: record.playerIds || record.subscriptionIds || record.pushIds || [],
+  };
+}
+
+function mergeResolvedWorker(payload = {}, resolved = {}) {
+  const name = resolveWorkerNameFromPayload(payload) || resolved.trabajador || resolved.nombre || resolved.workerName || "";
+  const dni = getDniFromPayload(payload) || resolved.dni || resolved.documento || "";
+  const sede = resolveSedeFromPayload(payload) || resolved.sede || resolved.sucursal || "";
+
+  return {
+    ...payload,
+    trabajador: name || payload.trabajador || payload.nombre || payload.workerName || "Trabajador",
+    nombre: name || payload.nombre || payload.trabajador || payload.workerName || "",
+    workerName: name || payload.workerName || payload.trabajador || payload.nombre || "",
+    dni,
+    documento: dni || payload.documento || "",
+    sede,
+    sucursal: sede || payload.sucursal || "",
+    trabajadorResueltoPorBackend: Boolean(name && !resolveWorkerNameFromPayload(payload)),
+  };
+}
+
+function workerMatchesPayload(worker = {}, payload = {}) {
+  const payloadDni = getDniFromPayload(payload);
+  const workerDni = getDniFromPayload(worker);
+  const ids = new Set(getReferenceIdsFromPayload(payload));
+  const workerIds = [
+    worker.id,
+    worker.trabajadorId,
+    worker.workerId,
+    worker.uid,
+    worker.userId,
+  ]
+    .filter(Boolean)
+    .map((x) => String(x).trim());
+
+  if (payloadDni && workerDni && payloadDni === workerDni) return true;
+  if (workerIds.some((id) => ids.has(id))) return true;
+
+  const payloadName = normalizeText(resolveWorkerNameFromPayload(payload));
+  const workerName = normalizeText(resolveWorkerNameFromPayload(worker));
+  if (payloadName && workerName && payloadName === workerName) return true;
+
+  return false;
+}
+
+async function findWorkerInFirestoreByRefs(payload = {}) {
+  if (!db || inQuotaBackoff()) return null;
+
+  const dni = getDniFromPayload(payload);
+  const refs = getReferenceIdsFromPayload(payload);
+
+  // 1) Buscar por ID directo en colecciones conocidas
+  for (const collectionName of WORKERS_COLLECTIONS) {
+    for (const refId of [...refs, dni].filter(Boolean)) {
+      try {
+        const snap = await db.collection(collectionName).doc(String(refId)).get();
+        if (snap.exists) {
+          const worker = normalizeWorkerFromRecord({ id: snap.id, ...snap.data() });
+          if (worker?.trabajador) return worker;
+        }
+      } catch (error) {
+        if (isQuotaError(error)) markQuotaBackoff();
+      }
+    }
+  }
+
+  // 2) Buscar por DNI/documento con limit 1
+  if (dni) {
+    for (const collectionName of WORKERS_COLLECTIONS) {
+      for (const field of ["dni", "documento", "numeroDocumento"]) {
+        try {
+          const snap = await db.collection(collectionName).where(field, "==", dni).limit(1).get();
+          if (!snap.empty) {
+            const doc = snap.docs[0];
+            const worker = normalizeWorkerFromRecord({ id: doc.id, ...doc.data() });
+            if (worker?.trabajador) return worker;
+          }
+        } catch (error) {
+          if (isQuotaError(error)) markQuotaBackoff();
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+async function findWorkerInAttendance(payload = {}) {
+  const refs = new Set(getReferenceIdsFromPayload(payload));
+  const dni = getDniFromPayload(payload);
+
+  // Primero usa cache de asistencia del día para evitar lecturas extras.
+  const cachedRecords = await getAttendanceTodayCached(false).catch(() => []);
+  const cachedMatch = cachedRecords.find((record) => {
+    if (record.id && refs.has(String(record.id))) return true;
+    if (record.asistenciaId && refs.has(String(record.asistenciaId))) return true;
+    const rDni = getDniFromPayload(record);
+    return dni && rDni && dni === rDni;
+  });
+
+  if (cachedMatch) {
+    const worker = normalizeWorkerFromRecord(cachedMatch);
+    if (worker?.trabajador) return worker;
+  }
+
+  if (!db || inQuotaBackoff()) return null;
+
+  // Si llega asistenciaId, intenta leer doc directo.
+  for (const refId of refs) {
+    for (const collectionName of ["asistencia", "asistencias"]) {
+      try {
+        const snap = await db.collection(collectionName).doc(String(refId)).get();
+        if (snap.exists) {
+          const worker = normalizeWorkerFromRecord({ id: snap.id, ...snap.data() });
+          if (worker?.trabajador) return worker;
+        }
+      } catch (error) {
+        if (isQuotaError(error)) markQuotaBackoff();
+      }
+    }
+  }
+
+  return null;
+}
+
+async function enrichWorkerIdentityForPush(payload = {}) {
+  const directName = resolveWorkerNameFromPayload(payload);
+  if (directName && directName !== "Trabajador") {
+    return mergeResolvedWorker(payload, { trabajador: directName });
+  }
+
+  const cacheKey = antiSpamKey([
+    "workerIdentity",
+    getDniFromPayload(payload),
+    ...getReferenceIdsFromPayload(payload),
+    payload.fecha,
+    payload.dateKey,
+  ]);
+
+  if (cacheKey && workerIdentityCache.hasFresh(cacheKey, 60 * 60 * 1000)) {
+    const cached = workerIdentityCache.get(cacheKey)?.value;
+    if (cached) return mergeResolvedWorker(payload, cached);
+  }
+
+  let resolved = null;
+
+  // 1) Cache de trabajadores
+  const workers = await getWorkersCached(false).catch(() => []);
+  resolved = workers.find((worker) => workerMatchesPayload(worker, payload));
+  if (resolved) resolved = normalizeWorkerFromRecord(resolved);
+
+  // 2) Documento asistencia
+  if (!resolved?.trabajador) {
+    resolved = await findWorkerInAttendance(payload).catch(() => null);
+  }
+
+  // 3) Firestore por trabajadorId/dni
+  if (!resolved?.trabajador) {
+    resolved = await findWorkerInFirestoreByRefs(payload).catch(() => null);
+  }
+
+  if (resolved?.trabajador && cacheKey) {
+    workerIdentityCache.set(cacheKey, resolved);
+  }
+
+  return mergeResolvedWorker(payload, resolved || {});
+}
+
+
 function resolveSedeFromPayload(source = {}) {
   return pickFirstText(source, ["sede", "sucursal", "local", "tienda", "store", "branch"]);
 }
@@ -808,9 +1037,10 @@ function buildPush(item = {}, id = "", collectionName = "") {
   }
 
   if (isBreak) {
+    const accionBreak = item.mensaje || item.tipo || item.accion || "break registrado";
     return {
-      type: "aprobacionPendiente", target: "admin", title: "☕ Movimiento de break",
-      message: `${trabajador}: ${item.mensaje || item.tipo || "break registrado"}${sedeText}.`, sede, data
+      type: "aprobacionPendiente", target: "admin", title: `☕ ${trabajador} · Movimiento de break`,
+      message: `${trabajador}: ${accionBreak}${sedeText}.`, sede, data
     };
   }
 
@@ -836,7 +1066,8 @@ async function processNotificationDoc(collectionName, docSnapshot) {
   }
 
   try {
-    const built = buildPush(data, id, collectionName);
+    const enrichedData = await enrichWorkerIdentityForPush(data);
+    const built = buildPush(enrichedData, id, collectionName);
 
     const result = await sendPush({
       ...built,
@@ -857,7 +1088,7 @@ async function processNotificationDoc(collectionName, docSnapshot) {
 
     // Push dual para trabajador en eventos que también le corresponden.
     if (["trabajador10MinAntes", "breakExcedido", "tardanza", "salidaAnticipada"].includes(built.type)) {
-      await maybeSendWorkerMirror(built, data).catch(() => null);
+      await maybeSendWorkerMirror(built, enrichedData).catch(() => null);
     }
 
   } catch (error) {
