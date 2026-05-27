@@ -1,4 +1,4 @@
-EL TABLÓN · FIX PLAYERID PUSH
+EL TABLÓN · PUSH ULTRA LIGHT FINAL
 
 REEMPLAZAR EN:
 onesignal-push-bridge
@@ -10,12 +10,17 @@ DOCUMENTOS COMPLETOS:
 - render.yaml
 - .env.example
 
-CORRIGE:
-- Envío OneSignal usando include_player_ids.
-- Ya NO usa include_external_user_ids.
-- Usa los playerId guardados en Firestore.
+CAMBIOS:
+✅ polling cada 60 segundos
+✅ cache memoria real
+✅ solo lectura incremental
+✅ sin onSnapshot
+✅ notificaciones solo del día
+✅ anti duplicados persistente en push_sent_log
+✅ include_player_ids correcto para OneSignal
+✅ menor consumo Firestore
 
-MANTIENE SOLO PUSH CRÍTICOS:
+PUSH SOLO PARA:
 - Tardanza mayor a tolerancia -> ADMIN/JEFATURA
 - Break mayor a 1 hora -> ADMIN/JEFATURA
 - Salida antes de hora -> ADMIN/JEFATURA
@@ -25,5 +30,5 @@ MANTIENE SOLO PUSH CRÍTICOS:
 DESPUÉS:
 npm install
 git add .
-git commit -m "fix playerid push"
+git commit -m "push ultra light firestore"
 git push
