@@ -62,12 +62,25 @@ function getDni(x = {}) {
   return String(x.dni || x.documento || x.trabajadorDni || x.workerDni || "").replace(/\D/g, "");
 }
 
-function playerIds(x = {}) {
+function getPlayerIds(x = {}) {
   return [...new Set([
-    x.playerId, x.oneSignalPlayerId, x.onesignalPlayerId, x.subscriptionId,
+    x.playerId,
+    x.oneSignalPlayerId,
+    x.onesignalPlayerId,
+    x.subscriptionId,
+    x.idOneSignal,
     ...(Array.isArray(x.playerIds) ? x.playerIds : []),
     ...(Array.isArray(x.subscriptionIds) ? x.subscriptionIds : []),
   ].filter(Boolean).map(v => String(v).trim()))].filter(v => v.length > 10);
+}
+
+function isAdminRecord(x = {}) {
+  const role = norm(x.rol || x.role || x.tipo || "");
+  return x.admin === true || x.esAdmin === true || x.esJefe === true || role.includes("admin") || role.includes("jefe") || role.includes("supervisor");
+}
+
+function isActive(x = {}) {
+  return x.activo !== false && x.pushActivo !== false && x.disabled !== true;
 }
 
 function toDate(v) {
@@ -137,27 +150,23 @@ function lateMinutes(r = {}, w = {}) {
   return diff > 0 ? diff : 0;
 }
 
-function notificationPayload({ title, message, ids, data }) {
+function visiblePayload({ title, message, ids, data }) {
   return {
     app_id: ONE_SIGNAL_APP_ID,
     include_player_ids: ids,
-
-    // CAMPOS VISIBLES: fuerza que el nombre salga en el cuerpo.
     headings: { es: title, en: title },
-    subtitle: { es: message, en: message },
     contents: { es: message, en: message },
-
-    // Compatibilidad web push / mobile.
+    subtitle: { es: message, en: message },
     web_push_topic: String(data?.type || "el_tablon_alerta"),
-    chrome_web_icon: "/logo192.png",
-    chrome_web_badge: "/logo192.png",
-    small_icon: "ic_stat_onesignal_default",
-
+    android_group: "el_tablon_alertas",
+    android_accent_color: "FF0EA5E9",
+    priority: 10,
+    ttl: 86400,
     data: {
       ...data,
       title,
-      message,
       body: message,
+      message,
       trabajador: data?.trabajador || "",
     },
   };
@@ -166,7 +175,7 @@ function notificationPayload({ title, message, ids, data }) {
 async function getCol(name) {
   try {
     const snap = await db.collection(name).get();
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return snap.docs.map(d => ({ id: d.id, ...d.data(), __collection: name }));
   } catch (e) {
     log(`No se pudo leer ${name}:`, e.code || e.message);
     return [];
@@ -175,10 +184,16 @@ async function getCol(name) {
 
 async function adminsCached(force = false) {
   if (!force && Date.now() - memory.admins.ts < CACHE_MS && memory.admins.rows.length) return memory.admins.rows;
+
   const rows = [];
-  for (const c of ["admins_push", "push_admins", "usuarios_roles"]) rows.push(...await getCol(c));
-  memory.admins = { ts: Date.now(), rows };
-  return rows;
+  // admins_push suele tener PC; push_devices/push_tokens puede tener móvil.
+  for (const c of ["admins_push", "push_admins", "usuarios_roles", "push_devices", "push_tokens"]) {
+    rows.push(...await getCol(c));
+  }
+
+  const onlyAdmins = rows.filter(r => isActive(r) && (isAdminRecord(r) || r.__collection === "admins_push" || r.__collection === "push_admins"));
+  memory.admins = { ts: Date.now(), rows: onlyAdmins };
+  return onlyAdmins;
 }
 
 async function workersCached(force = false) {
@@ -197,7 +212,11 @@ async function devicesCached(force = false) {
 }
 
 async function adminIds() {
-  return (await adminsCached()).flatMap(playerIds);
+  const rows = await adminsCached();
+  const ids = rows.flatMap(getPlayerIds);
+  const unique = [...new Set(ids)];
+  log(`Destinos admin activos detectados: ${unique.length}`);
+  return unique;
 }
 
 async function resolveWorker(r = {}) {
@@ -217,14 +236,14 @@ async function resolveWorker(r = {}) {
 }
 
 async function workerIds(worker = {}) {
-  const direct = playerIds(worker);
+  const direct = getPlayerIds(worker);
   if (direct.length) return direct;
 
   const dni = getDni(worker);
   const name = norm(getName(worker));
   const devices = await devicesCached();
 
-  return devices.filter(d => (dni && getDni(d) === dni) || (name && norm(getName(d)) === name)).flatMap(playerIds);
+  return devices.filter(d => isActive(d) && ((dni && getDni(d) === dni) || (name && norm(getName(d)) === name))).flatMap(getPlayerIds);
 }
 
 async function sendOneSignal({ title, message, playerIds, data = {} }) {
@@ -240,7 +259,7 @@ async function sendOneSignal({ title, message, playerIds, data = {} }) {
     return null;
   }
 
-  const payload = notificationPayload({ title, message, ids, data });
+  const payload = visiblePayload({ title, message, ids, data });
 
   const res = await fetch("https://onesignal.com/api/v1/notifications", {
     method: "POST",
@@ -249,7 +268,7 @@ async function sendOneSignal({ title, message, playerIds, data = {} }) {
   });
 
   const json = await res.json().catch(() => ({}));
-  log("push enviado NOMBRE_VISIBLE:", title, message, json);
+  log(`push enviado PC_MOVIL_NOMBRE (${ids.length} destinos):`, title, message, json);
   return json;
 }
 
@@ -445,7 +464,7 @@ async function tick() {
     await sweepBreaksExceeded();
     await sweepEntryReminders();
 
-    log("tick OK: nombre visible + fechaOperativa/fechaIso");
+    log("tick OK: PC+MOVIL+NOMBRE visible");
   } catch (e) {
     log("tick error:", e.code || e.message);
   }
@@ -453,8 +472,8 @@ async function tick() {
 
 app.get("/", (_, res) => res.json({
   ok: true,
-  service: "EL TABLÓN PUSH NOMBRE VISIBLE",
-  mode: "polling_60s_today_nombre_visible",
+  service: "EL TABLÓN PUSH PC MOVIL NOMBRE",
+  mode: "polling_60s_pc_movil_nombre_visible",
 }));
 
 app.get("/health", (_, res) => res.json({ ok: true, ts: new Date().toISOString(), processed: memory.processed.size }));
@@ -463,7 +482,7 @@ app.post("/test-push-admin", async (_, res) => {
   const ids = await adminIds();
   const result = await sendOneSignal({
     title: "✅ Prueba push admin",
-    message: "Wilberth Pacheco Delgadillo: prueba con nombre visible.",
+    message: "Wilberth Pacheco Delgadillo: prueba visible en PC y móvil.",
     playerIds: ids,
     data: { type: "test_admin", trabajador: "Wilberth Pacheco Delgadillo" },
   });
@@ -471,8 +490,8 @@ app.post("/test-push-admin", async (_, res) => {
 });
 
 app.listen(PORT, () => {
-  log(`EL TABLÓN PUSH NOMBRE VISIBLE activo en puerto ${PORT}`);
-  log("Modo: polling 60s, sin onSnapshot, body real con nombre del colaborador.");
+  log(`EL TABLÓN PUSH PC MOVIL NOMBRE activo en puerto ${PORT}`);
+  log("Modo: polling 60s, PC+móvil, body real con nombre del colaborador.");
 });
 
 setTimeout(tick, 5000);
