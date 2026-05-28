@@ -6,24 +6,13 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3001;
-
-const ONE_SIGNAL_APP_ID =
-  process.env.ONE_SIGNAL_APP_ID ||
-  process.env.ONESIGNAL_APP_ID ||
-  "";
-
-const ONE_SIGNAL_REST_API_KEY =
-  process.env.ONE_SIGNAL_REST_API_KEY ||
-  process.env.ONESIGNAL_REST_API_KEY ||
-  "";
-
+const ONE_SIGNAL_APP_ID = process.env.ONE_SIGNAL_APP_ID || process.env.ONESIGNAL_APP_ID || "";
+const ONE_SIGNAL_REST_API_KEY = process.env.ONE_SIGNAL_REST_API_KEY || process.env.ONESIGNAL_REST_API_KEY || "";
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "";
 const FIREBASE_CLIENT_EMAIL = process.env.FIREBASE_CLIENT_EMAIL || "";
 let FIREBASE_PRIVATE_KEY = process.env.FIREBASE_PRIVATE_KEY || "";
 
-if (FIREBASE_PRIVATE_KEY.includes("\\n")) {
-  FIREBASE_PRIVATE_KEY = FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
-}
+if (FIREBASE_PRIVATE_KEY.includes("\\n")) FIREBASE_PRIVATE_KEY = FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -38,8 +27,8 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 const TZ = "America/Lima";
-const POLL_MS = Number(process.env.POLL_MS || 60_000);
-const CACHE_MS = Number(process.env.CACHE_MS || 15 * 60_000);
+const POLL_MS = Number(process.env.POLL_MS || 60000);
+const CACHE_MS = Number(process.env.CACHE_MS || 900000);
 const TOLERANCIA_MIN = Number(process.env.MINUTOS_TOLERANCIA || 8);
 const BREAK_MAX_MIN = Number(process.env.BREAK_MAX_MINUTOS || 60);
 const REMINDER_MIN = Number(process.env.REMINDER_MINUTOS || 10);
@@ -49,7 +38,7 @@ const memory = {
   workers: { ts: 0, rows: [] },
   devices: { ts: 0, rows: [] },
   processed: new Set(),
-  lastAttendanceCheckMs: Date.now() - 10 * 60_000,
+  lastAttendanceCheckMs: Date.now() - 10 * 60000,
   lastBreakSweepMs: 0,
   lastReminderMinuteKey: "",
 };
@@ -63,33 +52,15 @@ function todayKey(date = new Date()) {
 }
 
 function normalizeText(value = "") {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim();
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 }
 
 function getName(data = {}) {
-  return (
-    data.trabajador ||
-    data.nombre ||
-    data.workerName ||
-    data.nombreTrabajador ||
-    data.colaborador ||
-    data.empleado ||
-    "Trabajador"
-  );
+  return data.trabajador || data.nombre || data.workerName || data.nombreTrabajador || data.colaborador || data.empleado || "Trabajador";
 }
 
 function getDni(data = {}) {
-  return String(
-    data.dni ||
-    data.documento ||
-    data.trabajadorDni ||
-    data.workerDni ||
-    ""
-  ).replace(/\D/g, "");
+  return String(data.dni || data.documento || data.trabajadorDni || data.workerDni || "").replace(/\D/g, "");
 }
 
 function getPlayerIds(data = {}) {
@@ -102,8 +73,7 @@ function getPlayerIds(data = {}) {
     ...(Array.isArray(data.subscriptionIds) ? data.subscriptionIds : []),
   ];
 
-  return [...new Set(values.filter(Boolean).map((id) => String(id).trim()))]
-    .filter((id) => id.length > 10);
+  return [...new Set(values.filter(Boolean).map((id) => String(id).trim()))].filter((id) => id.length > 10);
 }
 
 function toDate(value) {
@@ -114,28 +84,26 @@ function toDate(value) {
 }
 
 function createdDate(record = {}) {
-  return (
-    toDate(record.createdAt) ||
-    toDate(record.fechaHora) ||
-    toDate(record.fechaIso) ||
-    toDate(record.fechaMarcacion) ||
-    toDate(record.fecha) ||
-    new Date()
-  );
+  return toDate(record.createdAt) || toDate(record.fechaHora) || toDate(record.fechaIso) || toDate(record.fechaMarcacion) || toDate(record.fecha) || new Date();
 }
 
 function parseTimeToMinutes(value) {
   if (!value) return null;
+  const clean = String(value)
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace("a.m.", "am")
+    .replace("p.m.", "pm")
+    .replace("a.m", "am")
+    .replace("p.m", "pm");
 
-  const clean = String(value).toLowerCase().replace(/\s+/g, "");
   const match = clean.match(/(\d{1,2}):(\d{2})/);
   if (!match) return null;
 
   let h = Number(match[1]);
   const m = Number(match[2]);
-
-  const isPm = clean.includes("pm") || clean.includes("p.m");
-  const isAm = clean.includes("am") || clean.includes("a.m");
+  const isPm = clean.includes("pm");
+  const isAm = clean.includes("am");
 
   if (isPm && h < 12) h += 12;
   if (isAm && h === 12) h = 0;
@@ -154,17 +122,35 @@ function scheduleEndMinutes(schedule = "") {
 }
 
 function markTimeMinutes(record = {}) {
-  return parseTimeToMinutes(record.hora || record.horaTexto || record.time || record.createdAt);
+  return parseTimeToMinutes(record.hora || record.horaTexto || record.horaMarcacion || record.time || record.createdAt);
 }
 
 function isTodayRecord(record = {}) {
-  const k =
-    record.fechaIso ||
-    record.fechaOperativa ||
-    record.workDate ||
-    todayKey(createdDate(record));
-
+  const k = record.fechaIso || record.fechaOperativa || record.workDate || todayKey(createdDate(record));
   return k === todayKey();
+}
+
+function getRecordSchedule(record = {}, worker = {}) {
+  return record.horario || record.horarioTexto || record.turno || record.jornada || worker.horario || worker.horarioTexto || worker.turno || worker.jornada || "";
+}
+
+// FIX PUNTUAL: tardanza calculada por horario real.
+// Ya no depende solo de campos tardanza/minutosTardanza guardados en Firestore.
+function calculateLateMinutes(record = {}, worker = {}) {
+  const savedLate = Number(record.tardanza ?? record.tardanzaMin ?? record.minutosTardanza ?? record.lateMinutes ?? 0);
+  if (Number.isFinite(savedLate) && savedLate > 0) return savedLate;
+
+  const schedule = getRecordSchedule(record, worker);
+  const start = scheduleStartMinutes(schedule);
+  const marked = markTimeMinutes(record);
+
+  if (start == null || marked == null) return 0;
+
+  let diff = marked - start;
+  if (diff < -720) diff += 1440; // soporte turno nocturno
+  if (diff < 0) return 0;
+
+  return diff;
 }
 
 async function safeGetCollection(collectionName) {
@@ -178,23 +164,17 @@ async function safeGetCollection(collectionName) {
 }
 
 async function getAdminsCached(force = false) {
-  if (!force && Date.now() - memory.admins.ts < CACHE_MS && memory.admins.rows.length) {
-    return memory.admins.rows;
-  }
+  if (!force && Date.now() - memory.admins.ts < CACHE_MS && memory.admins.rows.length) return memory.admins.rows;
 
   const rows = [];
-  for (const col of ["admins_push", "push_admins", "usuarios_roles"]) {
-    rows.push(...await safeGetCollection(col));
-  }
+  for (const col of ["admins_push", "push_admins", "usuarios_roles"]) rows.push(...await safeGetCollection(col));
 
   memory.admins = { ts: Date.now(), rows };
   return rows;
 }
 
 async function getWorkersCached(force = false) {
-  if (!force && Date.now() - memory.workers.ts < CACHE_MS && memory.workers.rows.length) {
-    return memory.workers.rows;
-  }
+  if (!force && Date.now() - memory.workers.ts < CACHE_MS && memory.workers.rows.length) return memory.workers.rows;
 
   const rows = await safeGetCollection("trabajadores");
   memory.workers = { ts: Date.now(), rows };
@@ -202,14 +182,10 @@ async function getWorkersCached(force = false) {
 }
 
 async function getDevicesCached(force = false) {
-  if (!force && Date.now() - memory.devices.ts < CACHE_MS && memory.devices.rows.length) {
-    return memory.devices.rows;
-  }
+  if (!force && Date.now() - memory.devices.ts < CACHE_MS && memory.devices.rows.length) return memory.devices.rows;
 
   const rows = [];
-  for (const col of ["push_devices", "push_tokens"]) {
-    rows.push(...await safeGetCollection(col));
-  }
+  for (const col of ["push_devices", "push_tokens"]) rows.push(...await safeGetCollection(col));
 
   memory.devices = { ts: Date.now(), rows };
   return rows;
@@ -228,30 +204,12 @@ async function resolveWorker(record = {}) {
 
   const found = workers.find((worker) => {
     if (dni && getDni(worker) && dni === getDni(worker)) return true;
-
-    if (
-      workerId &&
-      [worker.id, worker.uid, worker.trabajadorId, worker.workerId]
-        .filter(Boolean)
-        .map(String)
-        .includes(workerId)
-    ) {
-      return true;
-    }
-
-    if (directName !== "Trabajador" && normalizeText(getName(worker)) === normalizeText(directName)) {
-      return true;
-    }
-
+    if (workerId && [worker.id, worker.uid, worker.trabajadorId, worker.workerId].filter(Boolean).map(String).includes(workerId)) return true;
+    if (directName !== "Trabajador" && normalizeText(getName(worker)) === normalizeText(directName)) return true;
     return false;
   });
 
-  return {
-    ...(found || {}),
-    ...record,
-    trabajador: getName(found || record),
-    dni: dni || getDni(found || {}),
-  };
+  return { ...(found || {}), ...record, trabajador: getName(found || record), dni: dni || getDni(found || {}) };
 }
 
 async function getWorkerPlayerIds(worker = {}) {
@@ -294,10 +252,7 @@ async function sendOneSignal({ title, message, playerIds, data = {} }) {
 
   const response = await fetch("https://onesignal.com/api/v1/notifications", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Basic ${ONE_SIGNAL_REST_API_KEY}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Basic ${ONE_SIGNAL_REST_API_KEY}` },
     body: JSON.stringify(payload),
   });
 
@@ -360,14 +315,16 @@ async function processCriticalAttendance(record = {}, docId = "") {
   const tipo = normalizeText(record.tipo || record.tipoMarcacion || record.accion || "");
   const admins = await getAdminPlayerIds();
 
-  const late = Number(record.tardanza || record.tardanzaMin || record.minutosTardanza || 0);
+  const late = calculateLateMinutes(record, worker);
 
   if ((tipo.includes("entrada") || tipo.includes("ingreso")) && late > TOLERANCIA_MIN) {
+    const lateOverTolerance = late - TOLERANCIA_MIN;
+
     await sendOnce(`tardanza_${dni || name}_${dateKey}`, {
       title: "⚠️ Tardanza detectada",
-      message: `${name} llegó tarde: ${late} min sobre tolerancia.`,
+      message: `${name} llegó tarde: ${lateOverTolerance} min sobre tolerancia.`,
       playerIds: admins,
-      data: { type: "tardanza", trabajador: name, dni, dateKey },
+      data: { type: "tardanza", trabajador: name, dni, dateKey, minutosTardanza: late, sobreTolerancia: lateOverTolerance },
     });
   }
 
@@ -384,7 +341,7 @@ async function processCriticalAttendance(record = {}, docId = "") {
   }
 
   if (tipo.includes("salida")) {
-    const expectedEnd = scheduleEndMinutes(record.horario || record.horarioTexto || "");
+    const expectedEnd = scheduleEndMinutes(getRecordSchedule(record, worker));
     const mark = markTimeMinutes(record);
 
     if (expectedEnd != null && mark != null && mark < expectedEnd) {
@@ -407,36 +364,28 @@ async function pollAttendanceIncremental() {
   let rows = [];
 
   try {
-    const snap = await db
-      .collection("asistencia")
-      .where("createdAt", ">=", since.toISOString())
-      .limit(80)
-      .get();
-
+    const snap = await db.collection("asistencia").where("createdAt", ">=", since.toISOString()).limit(80).get();
     rows = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
   } catch (error) {
     log("Polling incremental fallback:", error.code || error.message);
 
     try {
       const snap = await db.collection("asistencia").limit(80).get();
-      rows = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
-        .filter(isTodayRecord);
+      rows = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })).filter(isTodayRecord);
     } catch (fallbackError) {
       log("No se pudo leer asistencia:", fallbackError.code || fallbackError.message);
       return;
     }
   }
 
-  for (const row of rows) {
-    await processCriticalAttendance(row, row.id);
-  }
+  for (const row of rows) await processCriticalAttendance(row, row.id);
 
-  memory.lastAttendanceCheckMs = now - 2 * 60_000;
+  memory.lastAttendanceCheckMs = now - 2 * 60000;
 }
 
 async function sweepBreaksExceeded() {
   const now = Date.now();
-  if (now - memory.lastBreakSweepMs < 8 * 60_000) return;
+  if (now - memory.lastBreakSweepMs < 8 * 60000) return;
   memory.lastBreakSweepMs = now;
 
   let rows = [];
@@ -465,7 +414,6 @@ async function sweepBreaksExceeded() {
   for (const [key, marks] of byWorker.entries()) {
     const sorted = marks.sort((a, b) => createdDate(a) - createdDate(b));
     const last = sorted[sorted.length - 1];
-
     const tipo = normalizeText(last.tipo || last.tipoMarcacion || "");
 
     if (!tipo.includes("break") || tipo.includes("termino") || tipo.includes("fin")) continue;
@@ -501,13 +449,9 @@ async function sweepEntryReminders() {
   for (const worker of workers) {
     if (worker.rol === "admin" || worker.activo === false) continue;
 
-    const schedule =
-      worker[dayKey] ||
-      worker.horario ||
-      (worker.horarios && worker.horarios[dayKey]) ||
-      "";
-
+    const schedule = worker[dayKey] || worker.horario || (worker.horarios && worker.horarios[dayKey]) || "";
     const start = scheduleStartMinutes(schedule);
+
     if (start == null) continue;
     if (start - nowMin !== REMINDER_MIN) continue;
 
@@ -534,27 +478,18 @@ async function tick() {
     await sweepBreaksExceeded();
     await sweepEntryReminders();
 
-    log("tick ultra light OK");
+    log("tick ultra light OK + tardanza calculada");
   } catch (error) {
     log("tick error:", error.code || error.message);
   }
 }
 
 app.get("/", (_, res) => {
-  res.json({
-    ok: true,
-    service: "EL TABLÓN PUSH ULTRA LIGHT",
-    mode: "polling_60s_no_onSnapshot_today_only",
-  });
+  res.json({ ok: true, service: "EL TABLÓN PUSH ULTRA LIGHT + TARDANZA CALCULADA", mode: "polling_60s_no_onSnapshot_today_only" });
 });
 
 app.get("/health", (_, res) => {
-  res.json({
-    ok: true,
-    ts: new Date().toISOString(),
-    processed: memory.processed.size,
-    lastAttendanceCheckMs: memory.lastAttendanceCheckMs,
-  });
+  res.json({ ok: true, ts: new Date().toISOString(), processed: memory.processed.size, lastAttendanceCheckMs: memory.lastAttendanceCheckMs });
 });
 
 app.post("/test-push-admin", async (_, res) => {
@@ -562,7 +497,7 @@ app.post("/test-push-admin", async (_, res) => {
 
   const result = await sendOneSignal({
     title: "✅ Prueba push admin",
-    message: "EL TABLÓN Ultra Light activo con include_player_ids.",
+    message: "EL TABLÓN Ultra Light activo con tardanza calculada.",
     playerIds: ids,
     data: { type: "test_admin" },
   });
@@ -571,7 +506,7 @@ app.post("/test-push-admin", async (_, res) => {
 });
 
 app.listen(PORT, () => {
-  log(`EL TABLÓN PUSH ULTRA LIGHT activo en puerto ${PORT}`);
+  log(`EL TABLÓN PUSH ULTRA LIGHT + TARDANZA CALCULADA activo en puerto ${PORT}`);
   log("Modo: polling cada 60s, cache real, incremental, sin onSnapshot, solo día actual.");
 });
 

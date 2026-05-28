@@ -1,4 +1,4 @@
-EL TABLÓN · PUSH ULTRA LIGHT FINAL
+EL TABLÓN · PUSH ULTRA LIGHT + TARDANZA CALCULADA
 
 REEMPLAZAR EN:
 onesignal-push-bridge
@@ -10,7 +10,12 @@ DOCUMENTOS COMPLETOS:
 - render.yaml
 - .env.example
 
-CAMBIOS:
+CAMBIO PUNTUAL:
+✅ La tardanza ahora se calcula por horario real:
+   horaIngreso vs inicioHorario + tolerancia.
+✅ Ya no depende solo de campos Firestore como tardanza/minutosTardanza.
+
+MANTIENE:
 ✅ polling cada 60 segundos
 ✅ cache memoria real
 ✅ solo lectura incremental
@@ -30,5 +35,5 @@ PUSH SOLO PARA:
 DESPUÉS:
 npm install
 git add .
-git commit -m "push ultra light firestore"
+git commit -m "push tardanza calculada"
 git push
