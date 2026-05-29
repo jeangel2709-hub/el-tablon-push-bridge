@@ -55,6 +55,11 @@ function log(...args) {
   console.log(new Date().toLocaleString("es-PE", { timeZone: TZ }), "|", ...args);
 }
 
+const QUIET_TICK_LOGS = process.env.QUIET_TICK_LOGS !== "false";
+const verboseLog = (...args) => {
+  if (!QUIET_TICK_LOGS) log(...args);
+};
+
 function todayKey(date = new Date()) {
   return date.toLocaleDateString("en-CA", { timeZone: TZ });
 }
@@ -240,7 +245,7 @@ async function adminIds() {
   const rows = await adminsCached();
   const ids = rows.flatMap(getPlayerIds);
   const unique = [...new Set(ids)];
-  log(`Destinos admin activos detectados: ${unique.length}`);
+  verboseLog(`Destinos admin activos detectados: ${unique.length}`);
   return unique;
 }
 
@@ -344,15 +349,18 @@ async function processRecord(record = {}, docId = "") {
 
   const late = lateMinutes(record, worker);
   if (isEntry({ id: docId, ...record }) && late > TOLERANCIA_MIN) {
-    const over = late - TOLERANCIA_MIN;
-    log(`Tardanza detectada: ${name} | ${over} min sobre tolerancia`);
+    const key = `tardanza_${dni || name}_${dateKey}`;
 
-    await sendOnce(`tardanza_${dni || name}_${dateKey}`, {
+    const sent = await sendOnce(key, {
       title: "⚠️ Tardanza detectada",
-      message: `${name} llegó tarde: ${over} min sobre tolerancia.`,
+      message: `${name} llegó tarde: ${late} min. Tolerancia máxima: ${TOLERANCIA_MIN} min.`,
       playerIds: admins,
-      data: { type: "tardanza", trabajador: name, dni, dateKey, minutosTardanza: late, sobreTolerancia: over },
+      data: { type: "tardanza", trabajador: name, dni, dateKey, minutosTardanza: late, toleranciaMin: TOLERANCIA_MIN },
     });
+
+    if (sent) {
+      log(`Tardanza enviada: ${name} | ${late} min total | tolerancia ${TOLERANCIA_MIN} min`);
+    }
   }
 
   const gpsOk = record.gpsValidado ?? record.gpsValido ?? record.gpsOk;
@@ -447,6 +455,39 @@ async function sweepBreaksExceeded() {
   }
 }
 
+
+async function readWeeklySchedulesForToday() {
+  const rows = [];
+  try {
+    const snap = await db.collection("horarios_semanales").limit(300).get();
+    snap.docs.forEach(d => rows.push({ id: d.id, ...d.data() }));
+  } catch (e) {
+    verboseLog("No se pudo leer horarios_semanales:", e.code || e.message);
+  }
+  return rows;
+}
+
+function isSameWorkerSchedule(row = {}, worker = {}) {
+  const rowDni = getDni(row);
+  const workerDni = getDni(worker);
+  if (rowDni && workerDni && rowDni === workerDni) return true;
+
+  const rowName = norm(getName(row));
+  const workerName = norm(getName(worker));
+  if (rowName && workerName && rowName === workerName) return true;
+
+  const rowId = String(row.workerId || row.uid || row.trabajadorId || "").trim();
+  const workerId = String(worker.id || worker.uid || worker.workerId || "").trim();
+  return !!rowId && !!workerId && rowId === workerId;
+}
+
+function getScheduleFromWeeklyRows(rows = [], worker = {}, dayKey = "") {
+  const matches = rows.filter(r => isSameWorkerSchedule(r, worker));
+  if (!matches.length) return "";
+  const last = matches[matches.length - 1] || {};
+  return last[dayKey] || last.horario || last.horarioTexto || last.turno || last.jornada || "";
+}
+
 async function sweepEntryReminders() {
   const now = new Date();
   const minuteKey = `${todayKey(now)}_${now.getHours()}_${now.getMinutes()}`;
@@ -454,6 +495,7 @@ async function sweepEntryReminders() {
   memory.lastReminderMinuteKey = minuteKey;
 
   const workers = await workersCached();
+  const weeklyRows = await readWeeklySchedulesForToday();
   const limaNow = new Date(now.toLocaleString("en-US", { timeZone: TZ }));
   const nowMin = limaNow.getHours() * 60 + limaNow.getMinutes();
   const dayKeys = ["dom", "lun", "mar", "mie", "jue", "vie", "sab"];
@@ -462,7 +504,12 @@ async function sweepEntryReminders() {
 
   for (const w of workers) {
     if (w.rol === "admin" || w.activo === false) continue;
-    const schedule = w[dayKey] || w.horario || (w.horarios && w.horarios[dayKey]) || "";
+    const schedule =
+      w[dayKey] ||
+      (w.horarios && w.horarios[dayKey]) ||
+      getScheduleFromWeeklyRows(weeklyRows, w, dayKey) ||
+      w.horario ||
+      "";
     const start = scheduleStart(schedule);
     if (start == null) continue;
     if (start - nowMin !== REMINDER_MIN) continue;
@@ -490,7 +537,7 @@ async function tick() {
     await sweepBreaksExceeded();
     await sweepEntryReminders();
 
-    log("tick OK: PC+MOVIL+NOMBRE visible");
+    verboseLog("tick OK: PC+MOVIL+NOMBRE visible");
   } catch (e) {
     log("tick error:", e.code || e.message);
   }
