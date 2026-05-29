@@ -5,6 +5,15 @@ const fetch = require("node-fetch");
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+// CORS seguro para que Firebase Hosting pueda llamar al bridge Render.
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 const PORT = process.env.PORT || 3001;
 const TZ = "America/Lima";
 const POLL_MS = Number(process.env.POLL_MS || 60000);
@@ -81,6 +90,22 @@ function isAdminRecord(x = {}) {
 
 function isActive(x = {}) {
   return x.activo !== false && x.pushActivo !== false && x.disabled !== true;
+}
+
+// SOLO estas notificaciones están permitidas para no saturar Firebase/OneSignal.
+const ALLOWED_PUSH_TYPES = new Set([
+  "tardanza",
+  "break_excedido",
+  "salida_anticipada",
+  "fuera_rango",
+  "falta_marcacion",
+  "recordatorio_ingreso",
+  "test_admin",
+  "test_worker",
+]);
+
+function isAllowedPushType(type = "") {
+  return ALLOWED_PUSH_TYPES.has(String(type || "").trim());
 }
 
 function toDate(v) {
@@ -429,9 +454,10 @@ async function sweepEntryReminders() {
   memory.lastReminderMinuteKey = minuteKey;
 
   const workers = await workersCached();
-  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const limaNow = new Date(now.toLocaleString("en-US", { timeZone: TZ }));
+  const nowMin = limaNow.getHours() * 60 + limaNow.getMinutes();
   const dayKeys = ["dom", "lun", "mar", "mie", "jue", "vie", "sab"];
-  const dayKey = dayKeys[now.getDay()];
+  const dayKey = dayKeys[limaNow.getDay()];
   const dateKey = todayKey(now);
 
   for (const w of workers) {
@@ -488,6 +514,174 @@ app.post("/test-push-admin", async (_, res) => {
   });
   res.json({ ok: true, ids: ids.length, result });
 });
+
+
+// ===============================
+// ENDPOINTS DIRECTOS FIREBASE/FRONTEND
+// ===============================
+// Permiten que el Dashboard o Movil.jsx llamen al bridge directamente.
+// Así Render despierta y quedan logs visibles cuando se genera una alerta.
+
+app.post("/send-admin", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const type = String(body.type || body.tipo || "").trim();
+
+    if (!isAllowedPushType(type)) {
+      return res.status(400).json({ ok: false, error: "tipo_no_permitido", type });
+    }
+
+    const ids = await adminIds();
+
+    const result = await sendOneSignal({
+      title: body.title || body.titulo || "Alerta El Tablón",
+      message: body.message || body.mensaje || "Nueva alerta del sistema.",
+      playerIds: ids,
+      data: {
+        type,
+        trabajador: body.trabajador || body.worker || "",
+        dni: body.dni || "",
+        origen: body.origen || "send_admin",
+      },
+    });
+
+    await markProcessed(`direct_admin_${type}_${Date.now()}`, {
+      type,
+      trabajador: body.trabajador || body.worker || "",
+      dni: body.dni || "",
+      direct: true,
+    });
+
+    res.json({ ok: true, destinatarios: ids.length, result });
+  } catch (error) {
+    log("Error /send-admin:", error.code || error.message);
+    res.status(500).json({ ok: false, error: error.message || "send_admin_error" });
+  }
+});
+
+app.post("/send-worker", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const type = String(body.type || body.tipo || "").trim();
+
+    if (!isAllowedPushType(type)) {
+      return res.status(400).json({ ok: false, error: "tipo_no_permitido", type });
+    }
+
+    const worker = await resolveWorker({
+      trabajador: body.trabajador || body.worker || body.nombre || "",
+      dni: body.dni || "",
+      workerId: body.workerId || body.uid || "",
+    });
+
+    const ids = await workerIds(worker);
+
+    const result = await sendOneSignal({
+      title: body.title || body.titulo || "El Tablón",
+      message: body.message || body.mensaje || "Tienes una notificación pendiente.",
+      playerIds: ids,
+      data: {
+        type,
+        trabajador: getName(worker),
+        dni: getDni(worker),
+        origen: body.origen || "send_worker",
+      },
+    });
+
+    await markProcessed(`direct_worker_${type}_${getDni(worker) || getName(worker)}_${Date.now()}`, {
+      type,
+      trabajador: getName(worker),
+      dni: getDni(worker),
+      direct: true,
+    });
+
+    res.json({ ok: true, trabajador: getName(worker), destinatarios: ids.length, result });
+  } catch (error) {
+    log("Error /send-worker:", error.code || error.message);
+    res.status(500).json({ ok: false, error: error.message || "send_worker_error" });
+  }
+});
+
+app.post("/send-alert", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const type = String(body.type || body.tipo || "").trim();
+    const target = String(body.target || body.destino || "admin").trim().toLowerCase();
+
+    if (!isAllowedPushType(type)) {
+      return res.status(400).json({ ok: false, error: "tipo_no_permitido", type });
+    }
+
+    const results = [];
+
+    if (target === "admin" || target === "both" || target === "ambos") {
+      const ids = await adminIds();
+      const result = await sendOneSignal({
+        title: body.adminTitle || body.title || body.titulo || "Alerta El Tablón",
+        message: body.adminMessage || body.message || body.mensaje || "Nueva alerta del sistema.",
+        playerIds: ids,
+        data: { type, trabajador: body.trabajador || body.worker || "", dni: body.dni || "", target: "admin" },
+      });
+      results.push({ target: "admin", ids: ids.length, result });
+    }
+
+    if (target === "worker" || target === "trabajador" || target === "both" || target === "ambos") {
+      const worker = await resolveWorker({
+        trabajador: body.trabajador || body.worker || body.nombre || "",
+        dni: body.dni || "",
+        workerId: body.workerId || body.uid || "",
+      });
+      const ids = await workerIds(worker);
+      const result = await sendOneSignal({
+        title: body.workerTitle || body.title || body.titulo || "El Tablón",
+        message: body.workerMessage || body.message || body.mensaje || "Tienes una notificación pendiente.",
+        playerIds: ids,
+        data: { type, trabajador: getName(worker), dni: getDni(worker), target: "worker" },
+      });
+      results.push({ target: "worker", trabajador: getName(worker), ids: ids.length, result });
+    }
+
+    res.json({ ok: true, type, target, results });
+  } catch (error) {
+    log("Error /send-alert:", error.code || error.message);
+    res.status(500).json({ ok: false, error: error.message || "send_alert_error" });
+  }
+});
+
+app.post("/test-push-worker", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const worker = await resolveWorker({
+      trabajador: body.trabajador || "Elisa Choque Pacsi",
+      dni: body.dni || "48084163",
+      workerId: body.workerId || "",
+    });
+
+    const ids = await workerIds(worker);
+
+    const result = await sendOneSignal({
+      title: "✅ Prueba push trabajador",
+      message: `${getName(worker)}: prueba visible en celular.`,
+      playerIds: ids,
+      data: { type: "test_worker", trabajador: getName(worker), dni: getDni(worker) },
+    });
+
+    res.json({ ok: true, trabajador: getName(worker), ids: ids.length, result });
+  } catch (error) {
+    log("Error /test-push-worker:", error.code || error.message);
+    res.status(500).json({ ok: false, error: error.message || "test_worker_error" });
+  }
+});
+
+app.post("/tick-now", async (_, res) => {
+  try {
+    await tick();
+    res.json({ ok: true, message: "tick ejecutado" });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message || "tick_error" });
+  }
+});
+
 
 app.listen(PORT, () => {
   log(`EL TABLÓN PUSH PC MOVIL NOMBRE activo en puerto ${PORT}`);
