@@ -549,7 +549,24 @@ app.get("/", (_, res) => res.json({
   mode: "polling_60s_pc_movil_nombre_visible",
 }));
 
-app.get("/health", (_, res) => res.json({ ok: true, ts: new Date().toISOString(), processed: memory.processed.size }));
+app.get("/health", async (_, res) => {
+  try {
+    await tick();
+    res.json({
+      ok: true,
+      ts: new Date().toISOString(),
+      processed: memory.processed.size,
+      mode: "health_runs_tick",
+    });
+  } catch (error) {
+    log("health tick error:", error.code || error.message);
+    res.status(500).json({
+      ok: false,
+      error: error.message || "health_tick_error",
+      ts: new Date().toISOString(),
+    });
+  }
+});
 
 app.post("/test-push-admin", async (_, res) => {
   const ids = await adminIds();
@@ -692,6 +709,30 @@ app.post("/send-alert", async (req, res) => {
   } catch (error) {
     log("Error /send-alert:", error.code || error.message);
     res.status(500).json({ ok: false, error: error.message || "send_alert_error" });
+  }
+});
+
+app.get("/test-push-worker", async (req, res) => {
+  try {
+    const worker = await resolveWorker({
+      trabajador: req.query.trabajador || "Elisa Choque Pacsi",
+      dni: req.query.dni || "48084163",
+      workerId: req.query.workerId || "",
+    });
+
+    const ids = await workerIds(worker);
+
+    const result = await sendOneSignal({
+      title: "✅ Prueba push trabajador",
+      message: `${getName(worker)}: prueba visible en celular.`,
+      playerIds: ids,
+      data: { type: "test_worker", trabajador: getName(worker), dni: getDni(worker) },
+    });
+
+    res.json({ ok: true, trabajador: getName(worker), ids: ids.length, result });
+  } catch (error) {
+    log("Error GET /test-push-worker:", error.code || error.message);
+    res.status(500).json({ ok: false, error: error.message || "test_worker_error" });
   }
 });
 
