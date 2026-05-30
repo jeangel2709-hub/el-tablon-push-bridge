@@ -527,6 +527,105 @@ async function sweepEntryReminders() {
   }
 }
 
+
+async function processPushQueue() {
+  let snap;
+  try {
+    snap = await db.collection("push_queue")
+      .where("estado", "==", "pendiente")
+      .limit(20)
+      .get();
+  } catch (e) {
+    log("No se pudo leer push_queue:", e.code || e.message);
+    return 0;
+  }
+
+  if (snap.empty) return 0;
+
+  let processed = 0;
+
+  for (const doc of snap.docs) {
+    const q = { id: doc.id, ...doc.data() };
+    const type = String(q.type || q.tipo || "").trim();
+
+    if (!isAllowedPushType(type)) {
+      await doc.ref.set({
+        estado: "omitido",
+        motivo: "tipo_no_permitido",
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      processed++;
+      continue;
+    }
+
+    const target = String(q.target || q.destino || "admin").trim().toLowerCase();
+    const title = q.title || q.titulo || "Alerta El Tablón";
+    const message = q.body || q.message || q.mensaje || "Nueva alerta del sistema.";
+
+    const results = [];
+
+    try {
+      if (target === "admin" || target === "both" || target === "ambos") {
+        const ids = await adminIds();
+        const result = await sendOneSignal({
+          title,
+          message,
+          playerIds: ids,
+          data: {
+            type,
+            trabajador: q.worker || q.trabajador || "",
+            dni: q.dni || "",
+            target: "admin",
+            queueId: doc.id,
+          },
+        });
+        results.push({ target: "admin", ids: ids.length, result });
+      }
+
+      if (target === "worker" || target === "trabajador" || target === "both" || target === "ambos") {
+        const worker = await resolveWorker({
+          trabajador: q.worker || q.trabajador || q.nombre || "",
+          dni: q.dni || "",
+          workerId: q.workerId || q.uid || "",
+        });
+        const ids = await workerIds(worker);
+        const result = await sendOneSignal({
+          title,
+          message,
+          playerIds: ids,
+          data: {
+            type,
+            trabajador: getName(worker),
+            dni: getDni(worker),
+            target: "worker",
+            queueId: doc.id,
+          },
+        });
+        results.push({ target: "worker", trabajador: getName(worker), ids: ids.length, result });
+      }
+
+      await doc.ref.set({
+        estado: "enviado",
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        results,
+      }, { merge: true });
+
+      log(`push_queue procesado: ${doc.id}`, JSON.stringify(results));
+      processed++;
+    } catch (e) {
+      await doc.ref.set({
+        estado: "error",
+        error: e.message || "queue_error",
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      log("Error procesando push_queue:", doc.id, e.code || e.message);
+      processed++;
+    }
+  }
+
+  return processed;
+}
+
 async function tick() {
   try {
     await adminsCached();
@@ -536,8 +635,9 @@ async function tick() {
     await pollAttendanceToday();
     await sweepBreaksExceeded();
     await sweepEntryReminders();
+    const queueProcessed = await processPushQueue();
 
-    verboseLog("tick OK: PC+MOVIL+NOMBRE visible");
+    verboseLog(`tick OK: PC+MOVIL+NOMBRE visible | queue=${queueProcessed}`);
   } catch (e) {
     log("tick error:", e.code || e.message);
   }
@@ -549,24 +649,7 @@ app.get("/", (_, res) => res.json({
   mode: "polling_60s_pc_movil_nombre_visible",
 }));
 
-app.get("/health", async (_, res) => {
-  try {
-    await tick();
-    res.json({
-      ok: true,
-      ts: new Date().toISOString(),
-      processed: memory.processed.size,
-      mode: "health_runs_tick",
-    });
-  } catch (error) {
-    log("health tick error:", error.code || error.message);
-    res.status(500).json({
-      ok: false,
-      error: error.message || "health_tick_error",
-      ts: new Date().toISOString(),
-    });
-  }
-});
+app.get("/health", (_, res) => res.json({ ok: true, ts: new Date().toISOString(), processed: memory.processed.size }));
 
 app.post("/test-push-admin", async (_, res) => {
   const ids = await adminIds();
@@ -709,30 +792,6 @@ app.post("/send-alert", async (req, res) => {
   } catch (error) {
     log("Error /send-alert:", error.code || error.message);
     res.status(500).json({ ok: false, error: error.message || "send_alert_error" });
-  }
-});
-
-app.get("/test-push-worker", async (req, res) => {
-  try {
-    const worker = await resolveWorker({
-      trabajador: req.query.trabajador || "Elisa Choque Pacsi",
-      dni: req.query.dni || "48084163",
-      workerId: req.query.workerId || "",
-    });
-
-    const ids = await workerIds(worker);
-
-    const result = await sendOneSignal({
-      title: "✅ Prueba push trabajador",
-      message: `${getName(worker)}: prueba visible en celular.`,
-      playerIds: ids,
-      data: { type: "test_worker", trabajador: getName(worker), dni: getDni(worker) },
-    });
-
-    res.json({ ok: true, trabajador: getName(worker), ids: ids.length, result });
-  } catch (error) {
-    log("Error GET /test-push-worker:", error.code || error.message);
-    res.status(500).json({ ok: false, error: error.message || "test_worker_error" });
   }
 });
 
